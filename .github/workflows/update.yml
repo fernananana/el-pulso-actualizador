@@ -1,0 +1,79 @@
+name: Actualizar el pulso del canal
+on:
+  schedule:
+    - cron: '17 * * * *'
+    - cron: '11 7 1 * *'
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: pulse-update
+  cancel-in-progress: false
+jobs:
+  update:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '17 * * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      id-token: write
+    steps:
+      - name: Solicitar la misma lectura privada y comprobarla
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json,os,sys,time,urllib.request,urllib.parse,urllib.error
+          target='https://wowtogo.es/el-pulso-del-canal/api/automatic'
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args):return None
+          opener=urllib.request.build_opener(NoRedirect())
+          def update():
+              url=os.environ['ACTIONS_ID_TOKEN_REQUEST_URL']+'&audience='+urllib.parse.quote(target,safe='')
+              if urllib.parse.urlsplit(url).hostname not in ('pipelines.actions.githubusercontent.com','vstoken.actions.githubusercontent.com'):
+                  # GitHub uses per-run runner hosts. Only its HTTPS OIDC request URL is accepted.
+                  host=urllib.parse.urlsplit(url).hostname or ''
+                  if not(host.endswith('.actions.githubusercontent.com') or host.endswith('.actions.githubusercontent.com.')):raise ValueError('Origen de identidad no permitido')
+              if not url.startswith('https://'):raise ValueError('La identidad requiere HTTPS')
+              req=urllib.request.Request(url,headers={'Authorization':'Bearer '+os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+              with opener.open(req,timeout=30) as r: token=json.load(r)['value']
+              req=urllib.request.Request(target,data=b'{}',headers={'Content-Type':'application/json','X-Pulse-Job-Token':token})
+              with opener.open(req,timeout=180) as r:out=json.load(r)
+              if out.get('ok') is not True or not out.get('lastSyncAt') or out.get('lastSyncAt')!=out.get('adviceGeneratedAt'):raise ValueError('Lectura no confirmada')
+              print(json.dumps({'ok':True,'lastSyncAt':out['lastSyncAt'],'adviceGeneratedAt':out['adviceGeneratedAt']}))
+          for attempt in range(2):
+              try:update();break
+              except Exception as e:
+                  print('::warning::No se ha completado este intento; los datos anteriores se conservan.')
+                  if attempt:sys.exit(1)
+                  time.sleep(30)
+          PY
+  keep-active:
+    if: github.event_name == 'workflow_dispatch' || github.event.schedule == '11 7 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - name: Mantener activa la programación mensual
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULSE_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import base64,datetime,json,os,urllib.request,urllib.error
+          repo=os.environ['PULSE_REPO']
+          if repo!='fernananana/el-pulso-actualizador':raise SystemExit('Repositorio no permitido')
+          url='https://api.github.com/repos/'+repo+'/contents/activity.txt'
+          headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json'}
+          try:
+              with urllib.request.urlopen(urllib.request.Request(url,headers=headers),timeout=30) as r:old=json.load(r)
+          except urllib.error.HTTPError as e:
+              if e.code!=404:raise
+              old={}
+          now=datetime.datetime.now(datetime.timezone.utc)
+          text=now.isoformat()+'\n'
+          body={'message':'Maintain the unattended hourly schedule','content':base64.b64encode(text.encode()).decode(),'branch':'main'}
+          if old.get('sha'):body['sha']=old['sha']
+          with urllib.request.urlopen(urllib.request.Request(url,headers=headers,data=json.dumps(body).encode(),method='PUT'),timeout=30) as r:
+              if r.status not in (200,201):raise SystemExit('No se pudo mantener la programación')
+          print('Programación mantenida; no se han escrito métricas ni credenciales.')
+          PY
