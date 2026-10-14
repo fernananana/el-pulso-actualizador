@@ -1,7 +1,7 @@
 name: Actualizar el pulso del canal
 on:
   schedule:
-    - cron: '17 * * * *'
+    - cron: '7,22,37,52 * * * *'
     - cron: '11 7 1 * *'
   workflow_dispatch:
 permissions: {}
